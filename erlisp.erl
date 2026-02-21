@@ -40,8 +40,8 @@ is_white(C) -> C =:= $\s orelse C =:= $\t orelse C =:= $\n orelse C =:= $\r.
 
 is_alpha(C) -> (C >= $A andalso C =< $Z) orelse (C >= $a andalso C =< $z).
 
-is_symstartchar(C) -> 
-    is_alpha(C) orelse lists:member(C, "*/><=?!-").
+is_symstartchar(C) ->
+    is_alpha(C) orelse lists:member(C, "*/><=?!-+").
 
 is_delimiter(C) -> 
     lists:member(C, "()[]{};\"") orelse is_white(C).
@@ -367,7 +367,7 @@ do_repl(Stm, Env, IsStdin) ->
     Ast = build_ast(Sexp),
     {Result, NewEnv} = eval(Ast, Env),
     case IsStdin of
-        true -> io:format("~p~n", [string_val(Result)]);
+        true -> io:format("~s~n", [string_val(Result)]);
         false -> ok
     end,
     repl(Stm1, NewEnv).
@@ -390,7 +390,7 @@ get_ic() ->
 main() -> 
     {State, IoDevice} = get_ic(),
     try 
-        repl (#stream{chan={State, IoDevice}}, stdlib())
+        repl (#stream{chan={State, IoDevice}}, basis())
     catch
         error:eof -> handle_eof(State, IoDevice)
     end.
@@ -403,3 +403,94 @@ handle_eof(stdin, _) ->
 
 stdlib() ->
     [].
+
+basis() ->
+    NumPrim = fun(Name, Op) ->
+        {Name, {primitive, Name, fun
+            ([{fixnum, A}, {fixnum, B}]) -> {fixnum, Op(A, B)};
+            (_) -> erlang:error({type_error, "(" ++ Name ++ " int int)"})
+        end}}
+    end,
+
+    CmpPrim = fun(Name, Op) ->
+        {Name, {primitive, Name, fun
+            ([{fixnum, A}, {fixnum, B}]) -> {boolean, Op(A, B)};
+            (_) -> erlang:error({type_error, "(" ++ Name ++ " int int)"})
+        end}}
+    end,
+
+    PrimList = {"list", {primitive, "list", fun(Args) -> 
+        lists:foldr(fun(X, Acc) -> {pair, X, Acc} end, nil, Args) 
+    end}},
+
+    PrimPair = {"pair", {primitive, "pair", fun
+        ([A, B]) -> {pair, A, B};
+        (_) -> erlang:error({type_error, "(pair a b)"})
+    end}},
+
+    PrimCar = {"car", {primitive, "car", fun
+        ([{pair, Car, _}]) -> Car;
+        (_) -> erlang:error({type_error, "(car non-nil-pair)"})
+    end}},
+
+    PrimCdr = {"cdr", {primitive, "cdr", fun
+        ([{pair, _, Cdr}]) -> Cdr;
+        (_) -> erlang:error({type_error, "(cdr non-nil-pair)"})
+    end}},
+
+    PrimAtomp = {"atom?", {primitive, "atom?", fun
+        ([{pair, _, _}]) -> {boolean, false};
+        ([_]) -> {boolean, true};
+        (_) -> erlang:error({type_error, "(atom? something)"})
+    end}},
+
+    PrimSymp = {"sym?", {primitive, "sym?", fun
+        ([{symbol, _}]) -> {boolean, true};
+        ([_]) -> {boolean, false};
+        (_) -> erlang:error({type_error, "(sym? single-arg)"})
+    end}},
+
+    PrimEq = {"eq", {primitive, "eq", fun
+        ([A, B]) -> {boolean, A =:= B};
+        (_) -> erlang:error({type_error, "(eq a b)"})
+    end}},
+
+    PrimGetchar = {"getchar", {primitive, "getchar", fun
+        ([]) -> 
+            case io:get_chars(standard_io, "", 1) of
+                eof -> {fixnum, -1};
+                [C] -> {fixnum, C}
+            end;
+        (_) -> erlang:error({type_error, "(getchar)"})
+    end}},
+
+    PrimPrint = {"print", {primitive, "print", fun
+        ([V]) -> 
+            io:format("~s", [string_val(V)]),
+            {symbol, "ok"};
+        (_) -> erlang:error({type_error, "(print val)"})
+    end}},
+
+    PrimItoc = {"itoc", {primitive, "itoc", fun
+        ([{fixnum, I}]) -> {symbol, [I]};
+        (_) -> erlang:error({type_error, "(itoc int)"})
+    end}},
+
+    PrimCat = {"cat", {primitive, "cat", fun
+        ([{symbol, A}, {symbol, B}]) -> {symbol, A ++ B};
+        (_) -> erlang:error({type_error, "(cat sym sym)"})
+    end}},
+
+    [
+        NumPrim("+", fun(A, B) -> A + B end),
+        NumPrim("-", fun(A, B) -> A - B end),
+        NumPrim("*", fun(A, B) -> A * B end),
+        NumPrim("/", fun(A, B) -> A div B end),
+        CmpPrim("<", fun(A, B) -> A < B end),
+        CmpPrim(">", fun(A, B) -> A > B end),
+        CmpPrim("=", fun(A, B) -> A =:= B end),
+        PrimList, PrimPair, PrimCar, PrimCdr,
+        PrimAtomp, PrimSymp, PrimEq,
+        PrimGetchar, PrimPrint, PrimItoc, PrimCat
+    ].
+
