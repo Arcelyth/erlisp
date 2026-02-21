@@ -19,7 +19,7 @@
     | {apply, exp(), exp()}
     | {call, exp(), [exp()]}
     | {lambda, [string()], exp()}
-    | {let_, let_kind(), [{string(), exp()}], exp()}
+    | {let_exp, let_kind(), [{string(), exp()}], exp()}
     | {defexp, def()}.
 
 -type let_kind() :: let_ | letstar | letrec.
@@ -181,8 +181,8 @@ build_ast(Sexp = {pair, _, _}) ->
                     {and_, build_ast(C1), build_ast(C2)};
                 [{symbol, "or"}, C1, C2] -> 
                     {or_, build_ast(C1), build_ast(C2)};
-                [{symbol, "quote"}, Sexp] -> 
-                    {literal, {quote, Sexp}};
+                [{symbol, "quote"}, Target] -> 
+                    {literal, {quote, Target}};
                 [{symbol, "lambda"}, NamesObj, Body] ->
                     case is_lobject_list(NamesObj) of
                         true ->
@@ -201,7 +201,7 @@ build_ast(Sexp = {pair, _, _}) ->
                     Kind = case S of "let" -> let_; "let*" -> letstar; "letrec" -> letrec end,
                     ParsedBindings = [parse_binding(B) || B <- lobject_to_list(Bindings)],
                     assert_unique([Name || {Name, _} <- ParsedBindings]),
-                    {let_, Kind, ParsedBindings, build_ast(Exp)};
+                    {let_exp, Kind, ParsedBindings, build_ast(Exp)};
                 [Fnexp | Args]  -> 
                     {call, build_ast(Fnexp), [build_ast(S) || S <- Args]};
                 [] -> erlang:error({parse_error, "Poorly formed expression"})
@@ -222,11 +222,137 @@ assert_unique(Names) ->
         false -> erlang:error({type_error, "Duplicate names in let bindings"})
     end.
 
-string_val(Val) ->
-    Val.
+string_list({pair, Car, nil}) -> string_val(Car);
+string_list({pair, Car, Cdr}) -> string_val(Car) ++ " " ++ string_list(Cdr);
+string_list(_) -> 
+    erlang:error({type_error, ""}).
 
-eval(Ast, Env) ->
-    {Ast, 1}.
+string_pair({pair, Car, Cdr}) -> string_val(Car) ++ " . " ++ string_val(Cdr);
+string_pair(_) -> 
+    erlang:error({type_error, ""}).
+
+string_val({fixnum, V}) -> integer_to_list(V);
+string_val({boolean, true}) -> "#t";
+string_val({boolean, false}) -> "#f";
+string_val({symbol, S}) -> S;
+string_val(nil) -> "nil";
+string_val(Sexp = {pair, Car, Cdr}) -> 
+    V = case is_lobject_list(Sexp) of
+            true -> string_list(Sexp);
+            false -> string_pair(Sexp)
+        end,
+    "(" ++ V ++ ")";
+string_val({primitive, Name, _}) -> "#<primitive:" ++ Name ++ ">";
+string_val({quote, Q}) -> "'" ++ string_val(Q);
+string_val({closure, _, _, _}) -> "#<closure>".
+
+bind(Name, Value, Env) ->
+    [{Name, Value} | Env].
+lookup(N, Env) ->
+    case lists:keyfind(N, 1, Env) of
+        {N, V} -> V;
+        false -> erlang:error({unbound_variable, N})
+    end.
+
+env_to_val([]) -> 
+    nil;
+env_to_val([{Name, Value} | Rest]) ->
+    {pair, bind_to_val(Name, Value), env_to_val(Rest)}.
+
+bind_to_val(Name, undefined) ->
+    {pair, {symbol, Name}, {symbol, "unspecified"}};
+bind_to_val(Name, Value) ->
+    {pair, {symbol, Name}, Value}.
+
+fix_env(Env, _FullEnv, 0) -> Env;
+fix_env([{N, {closure, Ns, B, _OldEnv}} | T], FullEnv, Count) ->
+    [{N, {closure, Ns, B, FullEnv}} | fix_env(T, FullEnv, Count - 1)];
+fix_env([H | T], FullEnv, Count) ->
+    [H | fix_env(T, FullEnv, Count)].
+
+eval_apply({primitive, _, F}, Es) -> F(Es);
+eval_apply({closure, Names, Body, ClEnv}, Es) -> 
+    NewEnv = lists:zip(Names, Es) ++ ClEnv,
+    eval_exp(Body, NewEnv);
+eval_apply(_, _) -> erlang:error({type_error, "(apply prim '(args)) or (prim args)"}).
+
+do_eval({literal, {quote, Q}}, Env) -> Q;
+do_eval({literal, L}, Env) -> L;
+do_eval({var, Name}, Env) -> lookup(Name, Env);
+do_eval({if_, Cond, T, F}, Env) -> 
+    case do_eval(Cond, Env) of 
+        {boolean, true} -> do_eval(T, Env);
+        {boolean, false} -> do_eval(F, Env);
+        _ -> erlang:error({type_error, "(if bool e1 e2)"})
+    end;
+do_eval({and_, C1, C2}, Env) ->
+    case {do_eval(C1, Env), do_eval(C2, Env)} of 
+        {{boolean, V1}, {boolean, V2}} -> {boolean, V1 and V2};
+        _ -> erlang:error({type_error, "(and bool bool)"})
+    end;
+do_eval({or_, C1, C2}, Env) -> 
+    case {do_eval(C1, Env), do_eval(C2, Env)} of 
+        {{boolean, V1}, {boolean, V2}} -> {boolean, V1 or V2};
+        _ -> erlang:error({type_error, "(or bool bool)"})
+    end;
+do_eval({apply, Fn, ArgsExp}, Env) -> 
+    eval_apply(do_eval(Fn, Env), lobject_to_list(do_eval(ArgsExp, Env)));
+do_eval({call, {var, "env"}, []}, Env) -> env_to_val(Env);
+do_eval({call, Fn, ArgsExps}, Env) -> 
+    Args = [do_eval(A, Env) || A <- ArgsExps],
+    eval_apply(do_eval(Fn, Env), Args);
+do_eval({lambda, Names, Val}, Env) -> {closure, Names, Val, Env};
+do_eval({let_exp, let_, Bs, Body}, Env) ->
+    NewBindings = [{N, do_eval(E, Env)} || {N, E} <- Bs],
+    eval_exp(Body, NewBindings ++ Env);
+do_eval({let_exp, letstar, Bs, Body}, Env) ->
+    FinalEnv = lists:foldl(fun({N, E}, AccEnv) ->
+        [{N, do_eval(E, AccEnv)} | AccEnv]
+    end, Env, Bs),
+    eval_exp(Body, FinalEnv);
+do_eval({let_exp, letrec, Bs, Body}, Env) ->
+    Names = [N || {N, _} <- Bs],
+    RecEnv = lists:foldl(fun({N, E}, AccEnv) ->
+        case E of
+            {lambda, Ns, BodyExp} -> 
+                [{N, {closure, Ns, BodyExp, AccEnv}} | AccEnv];
+            _ -> 
+                [{N, do_eval(E, Env)} | AccEnv]
+        end
+    end, Env, Bs),
+    FixedEnv = fix_env(RecEnv, RecEnv, length(Names)),
+    eval_exp(Body, FixedEnv);
+do_eval(_, Env) -> 
+    erlang:error({type_error, "unknown type"}).
+
+eval_exp(Exp, Env) ->
+    try
+        do_eval(Exp, Env)
+    catch
+        error:Reason ->
+            io:format("Error: ~p in expression ~p~n", [Reason, Exp]),
+            erlang:error(Reason)
+    end.
+
+eval_def({val, Name, ValExp}, Env) -> 
+    V = eval_exp(ValExp, Env),
+    {V, bind(Name, V, Env)};  
+eval_def({def, Name, Names, E}, Env) -> 
+    case eval_exp({lambda, Names, E}, Env) of
+        {closure, Formals, Body, ClEnv} ->
+            RecClo = {closure, Formals, Body, [{Name, {closure, Formals, Body, ClEnv}} | ClEnv]},
+            {RecClo, bind(Name, RecClo, Env)};
+        _ -> 
+            erlang:error({type_error, "Expecting closure in define"})
+    end;
+eval_def({exp, E}, Env) -> 
+    {eval_exp(E, Env), Env}.
+
+eval({defexp, Def}, Env) ->
+    eval_def(Def, Env);
+eval(Other, Env) ->
+    {eval_exp(Other, Env), Env}.
+    
 
 repl(Stm, Env) ->
     repl(Stm, Env, element(1, Stm#stream.chan) =:= stdin).
