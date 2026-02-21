@@ -236,7 +236,7 @@ string_val({boolean, true}) -> "#t";
 string_val({boolean, false}) -> "#f";
 string_val({symbol, S}) -> S;
 string_val(nil) -> "nil";
-string_val(Sexp = {pair, Car, Cdr}) -> 
+string_val(Sexp = {pair, _Car, _Cdr}) -> 
     V = case is_lobject_list(Sexp) of
             true -> string_list(Sexp);
             false -> string_pair(Sexp)
@@ -276,8 +276,8 @@ eval_apply({closure, Names, Body, ClEnv}, Es) ->
     eval_exp(Body, NewEnv);
 eval_apply(_, _) -> erlang:error({type_error, "(apply prim '(args)) or (prim args)"}).
 
-do_eval({literal, {quote, Q}}, Env) -> Q;
-do_eval({literal, L}, Env) -> L;
+do_eval({literal, {quote, Q}}, _Env) -> Q;
+do_eval({literal, L}, _Env) -> L;
 do_eval({var, Name}, Env) -> lookup(Name, Env);
 do_eval({if_, Cond, T, F}, Env) -> 
     case do_eval(Cond, Env) of 
@@ -322,7 +322,7 @@ do_eval({let_exp, letrec, Bs, Body}, Env) ->
     end, Env, Bs),
     FixedEnv = fix_env(RecEnv, RecEnv, length(Names)),
     eval_exp(Body, FixedEnv);
-do_eval(_, Env) -> 
+do_eval(_, _Env) -> 
     erlang:error({type_error, "unknown type"}).
 
 eval_exp(Exp, Env) ->
@@ -330,7 +330,6 @@ eval_exp(Exp, Env) ->
         do_eval(Exp, Env)
     catch
         error:Reason ->
-            io:format("Error: ~p in expression ~p~n", [Reason, Exp]),
             erlang:error(Reason)
     end.
 
@@ -363,15 +362,19 @@ repl(Stm, Env, false) ->
     do_repl(Stm, Env, false).
 
 do_repl(Stm, Env, IsStdin) ->
-    {Sexp, Stm1} = read_sexp(Stm),
-    Ast = build_ast(Sexp),
-    {Result, NewEnv} = eval(Ast, Env),
-    case IsStdin of
-        true -> io:format("~s~n", [string_val(Result)]);
-        false -> ok
-    end,
-    repl(Stm1, NewEnv).
-
+    try 
+        {Sexp, Stm1} = read_sexp(Stm),
+        Ast = build_ast(Sexp),
+        {Result, NewEnv} = eval(Ast, Env),
+        case IsStdin of
+            true -> io:format("~s~n", [string_val(Result)]);
+            false -> ok
+        end,
+        repl(Stm1, NewEnv)
+    catch 
+        error:Err -> io:format("Error: ~p~n", [Err]),
+        repl(Stm, Env)
+    end.
 
 -spec get_ic() -> chan().
 get_ic() -> 
