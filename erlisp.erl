@@ -411,7 +411,7 @@ get_ic() ->
 main() -> 
     {State, IoDevice} = get_ic(),
     try 
-        repl (#stream{chan={State, IoDevice}}, basis())
+        repl (#stream{chan={State, IoDevice}}, load_prelude())
     catch
         error:eof -> handle_eof(State, IoDevice)
     after
@@ -424,8 +424,47 @@ handle_eof(file, IoDevice) ->
 handle_eof(stdin, _) ->
     io:format("EOF on stdin, exiting~n").
 
-stdlib() ->
-    [].
+load_prelude() ->
+    Dir = "./prelude/*.elp",
+    Files = filelib:wildcard(Dir),
+    lists:foldl(fun(Path, AccEnv) ->
+        case file:open(Path, [read]) of
+            {ok, IoDevice} ->
+                Stm = #stream{chan = {file, IoDevice}},
+                try
+                    NewEnv = slurp(Stm, AccEnv),
+                    file:close(IoDevice),
+                    NewEnv
+                catch
+                    _ ->
+                        file:close(IoDevice),
+                        AccEnv 
+                end;
+            {error, _} ->
+                AccEnv
+        end
+    end, basis(), Files).
+
+slurp(Stm, Env) ->
+    try
+        case read_sexp(Stm) of 
+            {eof, _} -> erlang:error(eof);
+            {Sexp, Stm1} -> 
+                Ast = build_ast(Sexp),
+                {_Result, NewEnv} = eval_defonly(Ast, Env),
+                slurp(Stm1, NewEnv)
+        end
+    catch
+        error:eof -> Env;
+        error:{type_error, Reason} ->
+            io:format("Type error in prelude: ~p~n", [Reason]),
+            Env
+    end.
+
+eval_defonly({defexp, Def}, Env) ->
+    eval_def(Def, Env);
+eval_defonly(Other, _Env) ->
+    erlang:error({type_error, "Can only have definitions in prelude", Other}).
 
 basis() ->
     NumPrim = fun(Name, Op) ->
