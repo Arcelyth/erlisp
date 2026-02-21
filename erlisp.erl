@@ -4,6 +4,7 @@
 -type env() :: [any()].
 -type lobject() :: {fixnum, integer()}
     | {boolean, boolean()} 
+    | {string, string()}
     | {symbol, string()} 
     | nil 
     | {pair, lobject(), lobject()} 
@@ -105,6 +106,15 @@ read_fixnum(Stm, Acc) ->
             {{fixnum, Num}, unread_char(Stm1, C)}
     end.
 
+read_string(Stm, Acc) -> 
+    {C, Stm1} = read_char(Stm),
+    case C of 
+        $" -> 
+            Str = lists:reverse(Acc),
+            {{string, Str}, Stm1};
+        _ -> read_string(Stm1, [C | Acc])
+    end.
+
 read_list(Stm) ->
     Stm1 = consume_white(Stm),
     {C, Stm2} = read_char(Stm1),
@@ -136,6 +146,8 @@ read_sexp(Stm) ->
             {{quote, Obj}, Stm3};
         $~ -> 
             read_fixnum(Stm2, "-");
+        $" -> 
+            read_string(Stm2, []);
         _ when C >= $0, C =< $9 -> 
             read_fixnum(Stm2, [C]);
         _ ->
@@ -167,6 +179,7 @@ is_lobject_list(_) -> false.
 -spec build_ast(lobject()) -> exp().
 build_ast({fixnum, _} = Obj) -> {literal, Obj};
 build_ast({boolean, _} = Obj) -> {literal, Obj};
+build_ast({string, _} = Obj) -> {literal, Obj};
 build_ast(nil) -> {literal, nil};
 build_ast({quote, _} = Obj) -> {literal, Obj};
 build_ast({symbol, S}) -> {var, S};
@@ -197,6 +210,7 @@ build_ast(Sexp = {pair, _, _}) ->
                     {apply, build_ast(Fnexp), build_ast(Args)};
                 [{symbol, "cond"} | Conditions] -> 
                     cond_to_if(Conditions);
+                [{symbol, "val"}, {symbol, N}, E] -> {defexp, {val, N, build_ast(E)}};
                 [{symbol, S}, Bindings, Exp] when S =:= "let"; S =:= "let*"; S =:= "letrec" ->
                     Kind = case S of "let" -> let_; "let*" -> letstar; "letrec" -> letrec end,
                     ParsedBindings = [parse_binding(B) || B <- lobject_to_list(Bindings)],
@@ -225,13 +239,14 @@ assert_unique(Names) ->
 string_list({pair, Car, nil}) -> string_val(Car);
 string_list({pair, Car, Cdr}) -> string_val(Car) ++ " " ++ string_list(Cdr);
 string_list(_) -> 
-    erlang:error({type_error, ""}).
+    erlang:error({type_error, "expect pair"}).
 
 string_pair({pair, Car, Cdr}) -> string_val(Car) ++ " . " ++ string_val(Cdr);
 string_pair(_) -> 
-    erlang:error({type_error, ""}).
+    erlang:error({type_error, "expect pair"}).
 
 string_val({fixnum, V}) -> integer_to_list(V);
+string_val({string, S}) -> S;
 string_val({boolean, true}) -> "#t";
 string_val({boolean, false}) -> "#f";
 string_val({symbol, S}) -> S;
@@ -362,18 +377,21 @@ repl(Stm, Env, false) ->
     do_repl(Stm, Env, false).
 
 do_repl(Stm, Env, IsStdin) ->
-    try 
-        {Sexp, Stm1} = read_sexp(Stm),
-        Ast = build_ast(Sexp),
-        {Result, NewEnv} = eval(Ast, Env),
-        case IsStdin of
-            true -> io:format("~s~n", [string_val(Result)]);
-            false -> ok
-        end,
-        repl(Stm1, NewEnv)
-    catch 
-        error:Err -> io:format("Error: ~p~n", [Err]),
-        repl(Stm, Env)
+    case read_sexp(Stm) of
+        {eof, _} -> 
+            erlang:error(eof); 
+        {Sexp, Stm1} ->
+            try
+                Ast = build_ast(Sexp),
+                {Result, NewEnv} = eval(Ast, Env),
+                if IsStdin -> io:format("~s~n", [string_val(Result)]); true -> ok end,
+                repl(Stm1, NewEnv)
+            catch
+                error:eof -> erlang:error(eof);
+                Class:Reason -> 
+                    io:format("~s Error: ~p~n", [Class, Reason]),
+                    repl(Stm1, Env) 
+            end
     end.
 
 -spec get_ic() -> chan().
@@ -396,6 +414,8 @@ main() ->
         repl (#stream{chan={State, IoDevice}}, basis())
     catch
         error:eof -> handle_eof(State, IoDevice)
+    after
+        init:stop()
     end.
 
 handle_eof(file, IoDevice) ->
