@@ -21,6 +21,7 @@
     | {call, exp(), [exp()]}
     | {lambda, [string()], exp()}
     | {let_exp, let_kind(), [{string(), exp()}], exp()}
+    | {begin_, [exp()]}
     | {defexp, def()}.
 
 -type let_kind() :: let_ | letstar | letrec.
@@ -196,6 +197,8 @@ build_ast(Sexp = {pair, _, _}) ->
                     {or_, build_ast(C1), build_ast(C2)};
                 [{symbol, "quote"}, Target] -> 
                     {literal, {quote, Target}};
+                [{symbol, "begin"} | Body] -> 
+                    {begin_, [build_ast(E) || E <- Body]};
                 [{symbol, "lambda"}, NamesObj, Body] ->
                     case is_lobject_list(NamesObj) of
                         true ->
@@ -291,6 +294,12 @@ eval_apply({closure, Names, Body, ClEnv}, Es) ->
     eval_exp(Body, NewEnv);
 eval_apply(_, _) -> erlang:error({type_error, "(apply prim '(args)) or (prim args)"}).
 
+do_seq([], _Env) -> nil;
+do_seq([Last], Env) -> do_eval(Last, Env);
+do_seq([Exp | Rest], Env) -> 
+    do_eval(Exp, Env),
+    do_seq(Rest, Env).
+        
 do_eval({literal, {quote, Q}}, _Env) -> Q;
 do_eval({literal, L}, _Env) -> L;
 do_eval({var, Name}, Env) -> lookup(Name, Env);
@@ -312,6 +321,8 @@ do_eval({or_, C1, C2}, Env) ->
     end;
 do_eval({apply, Fn, ArgsExp}, Env) -> 
     eval_apply(do_eval(Fn, Env), lobject_to_list(do_eval(ArgsExp, Env)));
+do_eval({begin_, Exps}, Env) -> 
+    do_seq(Exps, Env);
 do_eval({call, {var, "env"}, []}, Env) -> env_to_val(Env);
 do_eval({call, Fn, ArgsExps}, Env) -> 
     Args = [do_eval(A, Env) || A <- ArgsExps],
@@ -367,7 +378,6 @@ eval({defexp, Def}, Env) ->
 eval(Other, Env) ->
     {eval_exp(Other, Env), Env}.
     
-
 repl(Stm, Env) ->
     repl(Stm, Env, element(1, Stm#stream.chan) =:= stdin).
 repl(Stm, Env, true) ->  
@@ -425,7 +435,7 @@ handle_eof(stdin, _) ->
     io:format("EOF on stdin, exiting~n").
 
 load_prelude() ->
-    Dir = "./prelude/*.elp",
+    Dir = "./prelude/*.lisp",
     Files = filelib:wildcard(Dir),
     lists:foldl(fun(Path, AccEnv) ->
         case file:open(Path, [read]) of
