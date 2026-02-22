@@ -14,9 +14,9 @@ Then run
 erl -noshell -s erlisp main -s init stop
 ```
 to start the REPL.
-Or, interpret the `.elp` Erlisp source file 
+Or, interpret the `.lisp` Erlisp source file 
 ```bash
-erl -noshell -s erlisp main [-extra] [file.elp] -s init stop
+erl -noshell -s erlisp main [-extra] [file.lisp] -s init stop
 ```
 You can also run in the Erlang's REPL: 
 ```bash
@@ -25,4 +25,7 @@ erl
 2> erlisp:main().
 ```
 
+## Examples
+
+[here](./examples) to see some examples
 
