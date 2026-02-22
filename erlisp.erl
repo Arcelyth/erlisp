@@ -429,7 +429,6 @@ main() ->
     end.
 
 handle_eof(file, IoDevice) ->
-    io:format("EOF reached, closing file~n"),
     file:close(IoDevice);
 handle_eof(stdin, _) ->
     io:format("EOF on stdin, exiting~n").
